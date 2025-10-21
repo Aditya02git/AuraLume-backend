@@ -11,7 +11,7 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // MongoDB Atlas connection
-const uri = "mongodb+srv://madityamondal2003_db_user:ee1NHgDBjmiXl0L0@cluster0.mjv6dkz.mongodb.net/?retryWrites=true&w=majority";
+const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
