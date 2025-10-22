@@ -1,22 +1,17 @@
-// subscriber.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail"); // Replace nodemailer
 const { MongoClient, ServerApiVersion } = require("mongodb");
 require("dotenv").config();
 
 const app = express();
 
-// Increase timeout for cold starts
-app.use((req, res, next) => {
-  req.setTimeout(60000); // 60 seconds
-  res.setTimeout(60000);
-  next();
-});
-
 app.use(cors());
 app.use(bodyParser.json());
+
+// SendGrid setup
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // MongoDB Atlas connection
 const uri = process.env.MONGO_URI;
@@ -26,29 +21,19 @@ const client = new MongoClient(uri, {
     strict: true,
     deprecationErrors: true,
   },
-  connectTimeoutMS: 30000,
-  socketTimeoutMS: 30000,
 });
 
-// Nodemailer setup with Gmail App Password
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASS,
-  },
-});
-
-// Health check endpoint
 app.get("/", (req, res) => {
-  res.status(200).json({ status: "Server is running" });
+  res.json({ 
+    status: "Server is running", 
+    timestamp: new Date().toISOString() 
+  });
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "OK", timestamp: new Date() });
+  res.json({ status: "OK" });
 });
 
-// Start server and connect to MongoDB
 async function startServer() {
   try {
     await client.connect();
@@ -57,24 +42,33 @@ async function startServer() {
     const db = client.db("newsletterDB");
     const subscribers = db.collection("subscribers");
 
-    // Subscribe route
     app.post("/subscribe", async (req, res) => {
+      console.log("📧 Subscription request received:", req.body);
+      
       const { email } = req.body;
 
-      if (!email) return res.status(400).json({ message: "Email is required" });
+      if (!email) {
+        console.log("❌ No email provided");
+        return res.status(400).json({ message: "Email is required" });
+      }
 
       try {
-        // Check if email already exists
         const existing = await subscribers.findOne({ email });
-        if (existing) return res.status(200).json({ message: "Already subscribed" });
+        if (existing) {
+          console.log("⚠️ Email already subscribed:", email);
+          return res.status(200).json({ message: "Already subscribed" });
+        }
 
-        // Save new subscriber
         await subscribers.insertOne({ email, date: new Date() });
+        console.log("✅ New subscriber added:", email);
 
-        // Send confirmation email (don't await - do it in background)
+        // Send confirmation email using SendGrid
         const subscriberMail = {
-          from: `"AuraLume ✨" <${process.env.GMAIL_USER}>`,
           to: email,
+          from: {
+            email: process.env.SENDGRID_FROM_EMAIL, // Must be verified in SendGrid
+            name: "AuraLume ✨"
+          },
           subject: "🌈 Welcome to AuraLume — You're In!",
           html: `
             <div style="
@@ -89,29 +83,14 @@ async function startServer() {
             ">
               <div style="text-align: center;">
                 <img src="https://cdn.jsdelivr.net/gh/Aditya02git/Icons/aura-logo-extralarge.png" alt="AuraLume Logo" width="70" style="margin-bottom: 10px;" />
-                <h1 style="font-size: 28px; color: #ff006e;">Welcome to <span style="
-                    color: #00f5ff;
-                    font-weight: bold;
-                    ">
-                    AuraLume
-                    </span>
-                    !
-                </h1>
+                <h1 style="font-size: 28px; color: #ff006e;">Welcome to <span style="color: #00f5ff; font-weight: bold;">AuraLume</span>!</h1>
               </div>
               <p style="font-size: 16px; line-height: 1.6;">Hi there 👋,</p>
               <p style="font-size: 16px; line-height: 1.6;">
                 We're thrilled to have you as part of the <b>AuraLume</b> community! ✨  
                 From now on, you'll receive exclusive updates, creative design insights, and sneak peeks of our latest UI components and features.
               </p>
-              <div style="
-                background: #9d4edd;
-                color: white;
-                padding: 12px 20px;
-                text-align: center;
-                border-radius: 8px;
-                font-weight: bold;
-                margin: 25px 0;
-              ">
+              <div style="background: #9d4edd; color: white; padding: 12px 20px; text-align: center; border-radius: 8px; font-weight: bold; margin: 25px 0;">
                 🌟 Stay inspired. Stay luminous.
               </div>
               <p style="font-size: 15px; color: #4b006e;">
@@ -128,32 +107,37 @@ async function startServer() {
           `,
         };
 
-        // Send emails in background (non-blocking)
-        transporter.sendMail(subscriberMail).catch(err => 
-          console.error("❌ Failed to send subscriber email:", err)
-        );
+        // Send emails (non-blocking)
+        sgMail.send(subscriberMail)
+          .then(() => console.log("✅ Subscriber email sent"))
+          .catch(err => console.error("❌ Subscriber email failed:", err.response?.body || err));
 
+        // Admin notification
         const adminMail = {
-          from: `"AuraLume ✨" <${process.env.GMAIL_USER}>`,
-          to: process.env.GMAIL_USER,
+          to: process.env.ADMIN_EMAIL,
+          from: {
+            email: process.env.SENDGRID_FROM_EMAIL,
+            name: "AuraLume ✨"
+          },
           subject: "🆕 New Newsletter Subscriber",
           text: `A new user subscribed: ${email}`,
         };
 
-        transporter.sendMail(adminMail).catch(err =>
-          console.error("❌ Failed to send admin notification:", err)
-        );
+        sgMail.send(adminMail)
+          .then(() => console.log("✅ Admin notified"))
+          .catch(err => console.error("❌ Admin email failed:", err.response?.body || err));
 
-        // Respond immediately without waiting for emails
         res.status(200).json({ message: "Subscribed successfully!" });
       } catch (err) {
-        console.error("❌ Error subscribing:", err);
+        console.error("❌ Subscription error:", err);
         res.status(500).json({ message: "Something went wrong" });
       }
     });
 
     const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
   } catch (err) {
     console.error("❌ MongoDB connection error:", err);
     process.exit(1);
